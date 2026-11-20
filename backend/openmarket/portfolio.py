@@ -5,6 +5,8 @@ posiciones en una moneda distinta de la base se informan aparte y no suman al to
 """
 from __future__ import annotations
 
+import math
+import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -23,6 +25,14 @@ class PortfolioError(ValueError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _number(value, name: str, *, limit: float = 1e12, allow_zero: bool = False) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        raise PortfolioError(f"{name} debe ser un número finito")
+    if value < 0 or (value == 0 and not allow_zero) or value >= limit:
+        raise PortfolioError(f"{name} fuera de rango")
+    return float(value)
 
 
 class PortfolioStore:
@@ -59,57 +69,75 @@ class PortfolioStore:
         with self.db.connect() as c:
             c.execute("DELETE FROM portfolios WHERE id=?", (pid,))
 
-    def transactions(self, pid: int) -> list[dict]:
-        with self.db.connect() as c:
-            rows = c.execute("SELECT * FROM transactions WHERE portfolio_id=? ORDER BY ts, id", (pid,)).fetchall()
-        return [dict(r) for r in rows]
+    def transactions(self, pid: int, conn: sqlite3.Connection | None = None) -> list[dict]:
+        if conn is None:
+            with self.db.connect() as connection:
+                return self.transactions(pid, connection)
+        rows = conn.execute(
+            "SELECT * FROM transactions WHERE portfolio_id=? ORDER BY ts, id", (pid,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # --- operaciones -----------------------------------------------------------------------------
     def add_transaction(self, pid: int, tx: dict, enforce_cash: bool = False) -> dict:
-        pf = self.get(pid)
         kind = tx["type"]
-        ts = tx.get("ts") or _now()
         symbol = None
+        quantity = price = amount = None
+        fee = _number(tx.get("fee", 0), "Comisión", limit=1e9, allow_zero=True)
         if kind in ("buy", "sell"):
-            asset = get_asset(tx.get("symbol", ""))
+            asset = get_asset(tx.get("symbol") or "")
             if asset is None:
                 raise PortfolioError("Símbolo desconocido")
             symbol = asset.symbol
-            if not (tx.get("quantity") and tx["quantity"] > 0 and tx.get("price") and tx["price"] > 0):
-                raise PortfolioError("Cantidad y precio deben ser positivos")
+            quantity = _number(tx.get("quantity"), "Cantidad")
+            price = _number(tx.get("price"), "Precio")
         elif kind in ("deposit", "withdraw"):
-            if not (tx.get("amount") and tx["amount"] > 0):
-                raise PortfolioError("El importe debe ser positivo")
-        state = self.positions_state(pid)
-        fee = float(tx.get("fee") or 0.0)
-        if fee < 0:
-            raise PortfolioError("La comisión no puede ser negativa")
-        if kind == "sell":
-            held = state["positions"].get(symbol, {}).get("qty", 0.0)
-            if tx["quantity"] > held + 1e-9:
-                raise PortfolioError(f"No se puede vender más de lo que se posee ({held:g})")
-        if kind == "buy" and (enforce_cash or pf["paper"]):
-            cost = tx["quantity"] * tx["price"] + fee
-            if cost > state["cash"] + 1e-9:
-                raise PortfolioError(f"Efectivo insuficiente ({state['cash']:.2f} disponible, {cost:.2f} necesario)")
-        if kind == "withdraw" and tx["amount"] > state["cash"] + 1e-9:
-            raise PortfolioError("Efectivo insuficiente para retirar")
-        with self.db.connect() as c:
-            cur = c.execute(
+            amount = _number(tx.get("amount"), "Importe")
+            if fee:
+                raise PortfolioError("Las comisiones solo se aplican a compras y ventas")
+        else:
+            raise PortfolioError("Tipo de movimiento desconocido")
+
+        ts = tx.get("ts")
+        if ts:
+            try:
+                parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except (ValueError, AttributeError) as exc:
+                raise PortfolioError("Fecha del movimiento inválida") from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            ts = parsed.astimezone(timezone.utc).isoformat()
+        else:
+            ts = _now()
+
+        with self.db.connect(write=True) as conn:
+            pf = self.get(pid, conn)
+            state = self.positions_state(pid, conn)
+            if kind == "sell":
+                held = state["positions"].get(symbol, {}).get("qty", 0.0)
+                if quantity > held or held <= 0:
+                    raise PortfolioError(f"No se puede vender más de lo que se posee ({held:g})")
+            if kind == "buy" and (enforce_cash or pf["paper"]):
+                cost = quantity * price + fee
+                if cost > state["cash"] + 1e-9:
+                    raise PortfolioError(f"Efectivo insuficiente ({state['cash']:.2f} disponible, {cost:.2f} necesario)")
+            if kind == "withdraw" and amount > state["cash"] + 1e-9:
+                raise PortfolioError("Efectivo insuficiente para retirar")
+            cur = conn.execute(
                 "INSERT INTO transactions(portfolio_id, ts, type, symbol, quantity, price, fee, amount, note) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
-                (pid, ts, kind, symbol, tx.get("quantity"), tx.get("price"), fee, tx.get("amount"), (tx.get("note") or "")[:500]),
+                (pid, ts, kind, symbol, quantity, price, fee, amount, (tx.get("note") or "")[:500]),
             )
-            row = c.execute("SELECT * FROM transactions WHERE id=?", (cur.lastrowid,)).fetchone()
-        return dict(row)
+            row = conn.execute("SELECT * FROM transactions WHERE id=?", (cur.lastrowid,)).fetchone()
+            return dict(row)
 
-    def positions_state(self, pid: int) -> dict:
+    def positions_state(self, pid: int, conn: sqlite3.Connection | None = None) -> dict:
         """Reproduce las transacciones: efectivo, posiciones a coste medio y P/L realizado."""
         cash = 0.0
         pos: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "avg_cost": 0.0})
         realized = 0.0
         fees = 0.0
-        for t in self.transactions(pid):
+        for t in self.transactions(pid, conn):
             fee = t["fee"] or 0.0
             fees += fee
             if t["type"] == "deposit":

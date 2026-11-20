@@ -11,7 +11,6 @@ from .config import Settings
 SCHEMA_VERSION = 1
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS price_cache (
     symbol TEXT NOT NULL,
     interval TEXT NOT NULL,
@@ -64,11 +63,13 @@ class Database:
         self.path = settings.db_path
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def connect(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path, timeout=15)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
         try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            if write:
+                conn.execute("BEGIN IMMEDIATE")
             yield conn
             conn.commit()
         except Exception:
@@ -83,7 +84,22 @@ class Database:
         with self.connect() as c:
             if self.path != ":memory:":
                 c.execute("PRAGMA journal_mode = WAL")
-            c.executescript(_SCHEMA)
-            c.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
-            )
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            row = c.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+            version = int(row["value"]) if row else 0
+            if not 0 <= version <= SCHEMA_VERSION:
+                raise RuntimeError("Versión de SQLite incompatible con OpenMarket")
+            if version == 0:
+                for statement in _SCHEMA.split(";"):
+                    if statement.strip():
+                        c.execute(statement)
+                c.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
+                    (str(SCHEMA_VERSION),),
+                )
+
+    def ready(self) -> bool:
+        with self.connect() as c:
+            row = c.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+            return row is not None and row["value"] == str(SCHEMA_VERSION)

@@ -24,7 +24,7 @@ def _float(name: str, default: float) -> float:
 class Settings:
     db_path: str = "data/openmarket.db"
     api_token: str = ""
-    demo_fallback: bool = True
+    demo_fallback: bool = False
     offline: bool = False
     stooq_url: str = "https://stooq.com"
     stooq_apikey: str = ""
@@ -68,7 +68,7 @@ def load_settings() -> Settings:
     return Settings(
         db_path=db,
         api_token=os.environ.get("OPENMARKET_API_TOKEN", ""),
-        demo_fallback=_bool("OPENMARKET_DEMO_FALLBACK", True),
+        demo_fallback=_bool("OPENMARKET_DEMO_FALLBACK", False),
         offline=_bool("OPENMARKET_OFFLINE", False),
         stooq_url=os.environ.get("OPENMARKET_STOOQ_URL", "https://stooq.com").rstrip("/"),
         stooq_apikey=os.environ.get("OPENMARKET_STOOQ_APIKEY", ""),

@@ -6,12 +6,15 @@ import csv
 import hmac
 import io
 import math
+import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Literal
 
 import pandas as pd
 from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
@@ -27,6 +30,7 @@ from .analysis.risk import correlation_matrix, risk_metrics
 from .catalog import CATALOG, CATEGORIES, DEFAULT_DASHBOARD, get_asset, search
 from .config import Settings, load_settings
 from .db import Database
+from .http_security import RequestBodyLimit, is_loopback_host, is_loopback_peer
 from .models import DataUnavailable, PriceSeries, utcnow_iso
 from .portfolio import PortfolioError, PortfolioStore, paper_fill_price
 from .service import DataService
@@ -75,7 +79,7 @@ NO_FRONTEND_HTML = """<!doctype html><html lang="es"><meta charset="utf-8"><titl
 <p>No se encontró el frontend compilado (<code>frontend/dist</code>). La API está activa: puedes ver su
 documentación en <a style="color:#5b8cff" href="/api/docs">/api/docs</a>.</p>
 <p>Para tener la interfaz, usa el repositorio completo (incluye <code>frontend/dist</code>) o compílala con
-Node.js 20+: <code>cd frontend &amp;&amp; npm ci &amp;&amp; npm run build</code> y reinicia.</p></body></html>"""
+Node.js 22.12+: <code>cd frontend &amp;&amp; npm ci &amp;&amp; npm run build</code> y reinicia.</p></body></html>"""
 
 
 def sanitize(obj):
@@ -172,9 +176,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     store = PortfolioStore(db)
     alerts = AlertStore(db)
 
-    app = FastAPI(title="OpenMarket", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        try:
+            yield
+        finally:
+            service.close()
+
+    app = FastAPI(title="OpenMarket", version=__version__, docs_url="/api/docs",
+                  openapi_url="/api/openapi.json", lifespan=lifespan)
     app.state.settings, app.state.service, app.state.store = settings, service, store
-    app.state.last_diag = 0.0
+    app.state.last_diag = -math.inf
+    diagnostics_lock = threading.Lock()
+    app.add_middleware(RequestBodyLimit)
 
     app.add_middleware(
         CORSMiddleware, allow_origins=list(settings.cors_origins), allow_methods=["GET", "POST", "DELETE"],
@@ -184,17 +198,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def auth_and_headers(request: Request, call_next):
         path = request.url.path
-        if settings.api_token and path.startswith("/api") and path != "/api/health" and request.method != "OPTIONS":
-            supplied = request.headers.get("authorization", "")
-            expected = f"Bearer {settings.api_token}"
-            if not hmac.compare_digest(supplied.encode(), expected.encode()):
-                return JSONResponse({"detail": "No autorizado: falta o es incorrecto el token (Authorization: Bearer …)."},
-                                    status_code=401)
-        response = await call_next(request)
+        is_api = path == "/api" or path.startswith("/api/")
+        local_request = (is_loopback_host(request.headers.get("host", "")) and request.client is not None
+                         and is_loopback_peer(request.client.host))
+        if not local_request and len(settings.api_token) < 32:
+            response = respond({"detail": "Configura un token para el acceso desde un host remoto"}, 403)
+        elif (settings.api_token and is_api and path != "/api/health" and request.method != "OPTIONS"
+              and not hmac.compare_digest(
+                  request.headers.get("authorization", "").encode(),
+                  f"Bearer {settings.api_token}".encode(),
+              )):
+            response = respond({"detail": "Token de API incorrecto o ausente"}, 401)
+            response.headers["WWW-Authenticate"] = "Bearer"
+        else:
+            response = await call_next(request)
+
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Frame-Options", "DENY")
+        if is_api and path != "/api/health":
+            response.headers.setdefault("Cache-Control", "no-store")
+        if not is_api and path != "/docs/oauth2-redirect" and path != "/redoc":
+            response.headers.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                "object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            )
         return response
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_request: Request, exc: RequestValidationError):
+        # Omitir los valores de entrada evita reflejar datos privados y serializar NaN/Infinity.
+        return respond({"detail": [{"loc": e["loc"], "msg": e["msg"], "type": e["type"]} for e in exc.errors()]}, 422)
+
+    @app.exception_handler(sqlite3.OperationalError)
+    async def sqlite_error(_request: Request, exc: sqlite3.OperationalError):
+        code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+        if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            return JSONResponse({"detail": "Almacenamiento ocupado. Reintenta en unos segundos."},
+                                status_code=503, headers={"Retry-After": "2"})
+        return respond({"detail": "No se pudo acceder al almacenamiento"}, 500)
 
     # --- helpers -------------------------------------------------------------------------------
     def series_or_error(symbol: str, years: int = 5, refresh: bool = False) -> PriceSeries:
@@ -224,6 +267,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         return {"status": "ok", "version": __version__, "offline": settings.offline,
                 "demo_fallback": settings.demo_fallback, "auth_required": bool(settings.api_token)}
+
+    @app.get("/api/ready")
+    def ready():
+        try:
+            if db.ready():
+                return {"status": "ready"}
+        except sqlite3.Error:
+            pass
+        return respond({"status": "not-ready"}, 503)
 
     @app.get("/api/modules")
     def modules():
@@ -423,6 +475,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tx = store.add_transaction(pid, body.model_dump())
         except PortfolioError as exc:
             raise HTTPException(422, str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(404, "Cartera no encontrada") from exc
         return respond(tx, 201)
 
     @app.post("/api/portfolios/{pid}/paper-order", status_code=201)
@@ -446,6 +500,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                              "price": px, "fee": fee, "note": note}, enforce_cash=True)
         except PortfolioError as exc:
             raise HTTPException(422, str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(404, "Cartera no encontrada") from exc
         return respond(tx, 201)
 
     @app.get("/api/portfolios/{pid}/export.csv")
@@ -608,10 +664,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/diagnostics")
     def diagnostics():
         from .check import run_checks
-        now = time.time()
-        if now - app.state.last_diag < 10:
-            raise HTTPException(429, "Espera unos segundos antes de repetir la comprobación")
-        app.state.last_diag = now
+        with diagnostics_lock:
+            now = time.monotonic()
+            if now - app.state.last_diag < 10:
+                raise HTTPException(429, "Espera unos segundos antes de repetir la comprobación")
+            app.state.last_diag = now
         return respond({"results": run_checks(service, settings), "offline": settings.offline})
 
     # --- frontend compilado --------------------------------------------------------------------------

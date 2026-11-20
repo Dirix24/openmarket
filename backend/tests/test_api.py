@@ -129,7 +129,7 @@ def test_portfolio_delete_and_404(client):
 
 def test_auth_token(settings, monkeypatch):
     monkeypatch.setattr("openmarket.providers.base.time.sleep", lambda s: None)
-    c = TestClient(create_app(replace(settings, api_token="s3cret")))
+    c = TestClient(create_app(replace(settings, api_token="s3cret")), base_url="http://localhost", client=("127.0.0.1", 50000))
     assert c.get("/api/health").status_code == 200
     assert c.get("/api/modules").status_code == 401
     assert c.get("/api/modules", headers={"Authorization": "Bearer wrong"}).status_code == 401
@@ -146,7 +146,7 @@ def test_offline_mode_never_calls_network(settings, monkeypatch):
 
     from openmarket.providers import base
     base.set_transport(httpx.MockTransport(lambda r: pytest.fail("no debe haber red en modo offline")))
-    c = TestClient(create_app(replace(settings, offline=True)))
+    c = TestClient(create_app(replace(settings, offline=True)), base_url="http://localhost", client=("127.0.0.1", 50000))
     d = c.get("/api/assets/AAPL?validate=false").json()
     assert d["provenance"]["status"] == "synthetic"
 
@@ -157,7 +157,7 @@ def test_spa_serving_and_path_traversal(settings, tmp_path):
     (dist / "index.html").write_text("<html>OM</html>")
     (dist / "secret.txt").write_text("fuera")
     (tmp_path / "outside.txt").write_text("no")
-    c = TestClient(create_app(replace(settings, frontend_dist=str(dist))))
+    c = TestClient(create_app(replace(settings, frontend_dist=str(dist))), base_url="http://localhost", client=("127.0.0.1", 50000))
     assert "OM" in c.get("/mercado/stock").text            # ruta de la SPA
     assert c.get("/secret.txt").text == "fuera"
     assert "OM" in c.get("/..%2foutside.txt").text          # traversal → index, nunca el archivo externo
