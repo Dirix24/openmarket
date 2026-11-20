@@ -53,6 +53,9 @@ class DataService:
         self._live_cache: dict[str, tuple[float, LiveQuote]] = {}
         self._pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="om-fetch")
 
+    def close(self) -> None:
+        self._pool.shutdown(wait=True, cancel_futures=True)
+
     # --- caché --------------------------------------------------------------------------------
     def _cache_get(self, symbol: str) -> tuple[pd.DataFrame, dict, float] | None:
         with self.db.connect() as c:

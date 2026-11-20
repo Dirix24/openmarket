@@ -66,7 +66,7 @@ def test_no_fallback_returns_503(settings, monkeypatch):
 
     from openmarket.main import create_app
     monkeypatch.setattr("openmarket.providers.base.time.sleep", lambda s: None)
-    c = TestClient(create_app(replace(settings, demo_fallback=False)))
+    c = TestClient(create_app(replace(settings, demo_fallback=False)), base_url="http://localhost", client=("127.0.0.1", 50000))
     assert c.get("/api/assets/AAPL").status_code == 503
 
 
@@ -127,7 +127,7 @@ def test_stooq_without_key_makes_no_request_and_explains(settings, monkeypatch):
     from openmarket.main import create_app
     monkeypatch.setattr("openmarket.providers.base.time.sleep", lambda s: None)
     provider_base.set_transport(httpx.MockTransport(lambda r: pytest.fail("no debe haber petición sin clave")))
-    c = TestClient(create_app(replace(settings, stooq_apikey="")))
+    c = TestClient(create_app(replace(settings, stooq_apikey="")), base_url="http://localhost", client=("127.0.0.1", 50000))
     d = c.get("/api/assets/AAPL?validate=false").json()
     assert d["provenance"]["status"] == "synthetic"
     src = {s["name"]: s for s in c.get("/api/sources").json()["sources"]}

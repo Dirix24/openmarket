@@ -27,7 +27,7 @@ Plataforma financiera **de código abierto, autoalojable y privada** para analiz
 
 ### Antes de usarla con datos reales (2 minutos)
 
-1. **Acciones, ETF, índices y materias primas necesitan una clave gratuita de Stooq** (desde marzo de 2026). Solicítala en <https://stooq.com/q/d/?s=spy.us&get_apikey> y ponla en `.env` como `OPENMARKET_STOOQ_APIKEY=...`. Sin clave, esos activos se muestran como **sintéticos** y la app te dice por qué. Cripto (Kraken) y forex (Frankfurter) no necesitan clave.
+1. **Acciones, ETF, índices y materias primas necesitan una clave gratuita de Stooq** (desde marzo de 2026). Solicítala en <https://stooq.com/q/d/?s=spy.us&get_apikey> y ponla en `.env` como `OPENMARKET_STOOQ_APIKEY=...`. Sin clave, esos activos pueden aparecer como no disponibles. El modo demo se activa explícitamente con `OPENMARKET_DEMO_FALLBACK=true` y etiqueta los resultados sintéticos. Cripto (Kraken) y forex (Frankfurter) no necesitan clave.
 2. **Precio en vivo de acciones de EE. UU. (opcional):** clave gratuita en <https://finnhub.io> → `OPENMARKET_FINNHUB_KEY=...`. Sin ella, esas fichas muestran el último cierre diario y lo dicen. El precio en vivo de cripto funciona sin clave.
 3. Comprueba los proveedores en vivo desde tu equipo (también hay un botón **Configuración → Comprobar ahora**):
    ```bash
@@ -37,7 +37,7 @@ Plataforma financiera **de código abierto, autoalojable y privada** para analiz
 
 ### Limitaciones que debes conocer
 
-1. **Los proveedores reales no se han probado en vivo** (y el nombre del parámetro de la clave de Stooq, `apikey`, no está verificado). El entorno de desarrollo no tenía acceso de red a Stooq, Kraken ni Frankfurter. Los adaptadores se prueban con respuestas simuladas (formato, errores, reintentos, caché, cortacircuitos). Si algún código de símbolo o formato no coincide con el servicio real, el error aparece en *Configuración → Fuentes de datos* y la app muestra datos **sintéticos claramente etiquetados**. Si lo ves, abre un *issue*.
+1. **Verificación de proveedores.** El diagnóstico validó el histórico y el ticker de BTC-USD de Kraken y el histórico EURUSD de Frankfurter. Stooq y Finnhub se cubren con respuestas de prueba. Su verificación en vivo con claves queda pendiente.
 2. **Las probabilidades no son una predicción.** Son frecuencias históricas del propio activo con el mismo estado de señal. La validación walk-forward las compara con la frecuencia incondicional; en los datos sintéticos de prueba **no la superan** (mejora ≈ 0,2 %), y la interfaz lo dice. No las uses para decidir.
 3. Conversión de divisas con tipos de referencia del BCE: son indicativos, no ejecutables, y el P/L de posiciones en otra moneda no incluye el efecto de la divisa desde la compra.
 4. Las **señales, probabilidades y backtests usan cierres diarios**. El precio en vivo es una capa aparte (ficha de activo y alertas); no es un feed profesional y no se ha verificado el formato de Finnhub.
@@ -54,7 +54,7 @@ Requisito: **Python ≥ 3.10**. Node.js **no** hace falta (el repositorio incluy
 Abre <http://127.0.0.1:8000>. Para parar: `Ctrl+C`. Otro puerto: `OPENMARKET_PORT=8010 ./scripts/start.sh`.
 En Debian/MX/Ubuntu, si falla la creación del entorno: `sudo apt install python3 python3-venv`.
 
-Sin conexión o para probar la interfaz: `OPENMARKET_OFFLINE=true` (todo se mostrará como **sintético**).
+Para trabajar sin red usa `OPENMARKET_OFFLINE=true`. La aplicación puede leer históricos CSV y caché local. Para habilitar además los datos de demostración, configura `OPENMARKET_DEMO_FALLBACK=true`.
 
 ### Usar datos reales sin red ni claves: CSV propios
 
@@ -68,7 +68,7 @@ o coma. Detalles en `data/prices/LEEME.txt`.
 ```bash
 # Terminal 1 — API
 cd backend && ../.venv/bin/python -m openmarket
-# Terminal 2 — frontend con recarga en caliente (requiere Node.js ≥ 20; proxy a la API)
+# Terminal 2 — frontend con recarga en caliente (requiere Node.js ≥ 22.12; proxy a la API)
 cd frontend && npm ci && npm run dev          # http://localhost:5173
 # Tras cambiar el frontend, recompila y vuelve a incluir dist:  npm run build
 ```
@@ -107,3 +107,13 @@ Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Registro de tareas: [docs/ROAD
 ## Licencia
 
 [AGPL-3.0-or-later](LICENSE). Las dependencias principales (FastAPI, pandas, NumPy, httpx, React, Vite, Tailwind, lightweight-charts) usan licencias permisivas (MIT/BSD/Apache-2.0) compatibles; comprueba las versiones concretas con `pip-licenses` / `license-checker` antes de distribuir.
+
+## Estado del proyecto
+
+OpenMarket se mantiene en **0.2.0** mientras se completan los criterios de la versión 1.0. El primer incremento de estabilización protege el saldo y las posiciones frente a operaciones concurrentes, refuerza el acceso remoto y añade copia y restauración verificadas de SQLite. El modo demo requiere activación explícita.
+
+La verificación local incluyó 102 pruebas de backend, 18 de frontend, typecheck, build y arranque con SQLite temporal. Se verificaron consultas reales a Kraken y Frankfurter. Quedan pendientes la verificación con claves de Stooq y Finnhub, la construcción Docker y la CI de release.
+
+El siguiente incremento limitará la antigüedad de los datos cacheados y mostrará su caducidad en la API y la interfaz. Consulta la [auditoría de estabilidad](docs/STABILITY_AUDIT.md) y la [guía de copia y restauración](docs/BACKUP.md).
+
+El mantenedor conserva la autoría y dirección del proyecto. Esta revisión de código, seguridad y pruebas contó con asistencia de IA.

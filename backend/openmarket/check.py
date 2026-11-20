@@ -16,6 +16,9 @@ LIVE_SAMPLES = {"kraken_live": "BTC-USD", "finnhub": "AAPL"}
 
 
 def run_checks(service: DataService, settings: Settings) -> list[dict]:
+    if settings.offline:
+        return [{"provider": "—", "kind": "aviso", "symbol": "", "ok": False,
+                 "detail": "Modo sin conexión activado (OPENMARKET_OFFLINE): desactívalo para probar."}]
     out: list[dict] = []
     for name, symbols in DAILY_SAMPLES.items():
         for sym in symbols:
@@ -38,9 +41,6 @@ def run_checks(service: DataService, settings: Settings) -> list[dict]:
                         "detail": f"{q.price:.4f} {q.currency} a las {q.as_of}"})
         except Exception as exc:  # noqa: BLE001
             out.append({"provider": name, "kind": "en vivo", "symbol": sym, "ok": False, "detail": str(exc)})
-    if settings.offline:
-        out.insert(0, {"provider": "—", "kind": "aviso", "symbol": "", "ok": False,
-                       "detail": "Modo sin conexión activado (OPENMARKET_OFFLINE): desactívalo para probar."})
     return out
 
 
@@ -49,7 +49,11 @@ def main() -> int:
     s = load_settings()
     db = Database(s)
     db.init()
-    results = run_checks(DataService(s, db), s)
+    service = DataService(s, db)
+    try:
+        results = run_checks(service, s)
+    finally:
+        service.close()
     failures = 0
     for r in results:
         flag = "OK   " if r["ok"] else "FALLO"

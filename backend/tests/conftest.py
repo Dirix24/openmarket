@@ -30,7 +30,8 @@ def settings(tmp_path):
 def client(settings, monkeypatch):
     # Reintentos sin esperas en pruebas
     monkeypatch.setattr("openmarket.providers.base.time.sleep", lambda s: None)
-    return TestClient(create_app(settings))
+    with TestClient(create_app(settings), base_url="http://localhost", client=("127.0.0.1", 50000)) as client:
+        yield client
 
 
 def make_ohlc(n=600, seed=1, drift=0.0004, vol=0.01, start="2022-01-03"):

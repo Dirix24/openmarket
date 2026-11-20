@@ -1,6 +1,7 @@
 """Capa común para proveedores: cliente HTTP con reintentos, límite de frecuencia y registro de salud."""
 from __future__ import annotations
 
+import ipaddress
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -83,6 +84,19 @@ class Provider(ABC):
             self._last_call = time.monotonic()
 
     def http_get(self, url: str, params: dict | None = None) -> httpx.Response:
+        try:
+            target = httpx.URL(url)
+        except (httpx.InvalidURL, ValueError) as exc:
+            raise ProviderError(f"{self.name}: URL configurada inválida") from exc
+        if target.scheme != "https" or not target.host or target.username or target.password or target.fragment:
+            raise ProviderError(f"{self.name}: el proveedor requiere HTTPS sin credenciales en la URL base")
+        try:
+            address = ipaddress.ip_address(target.host)
+        except ValueError:
+            address = None
+        if (address is not None and not address.is_global) or target.host.rstrip(".").lower() == "localhost":
+            raise ProviderError(f"{self.name}: destino local o reservado")
+
         last_exc: Exception | None = None
         for attempt in range(self.retries + 1):
             if self._breaker_open():
@@ -91,15 +105,26 @@ class Provider(ABC):
                 )
             self._throttle()
             try:
-                with httpx.Client(timeout=self.timeout, transport=_TRANSPORT, follow_redirects=True,
-                                  headers={"User-Agent": "OpenMarket/0.1 (self-hosted)"}) as client:
-                    resp = client.get(url, params=params)
-                if resp.status_code == 429 or resp.status_code >= 500:
-                    self._note_failure()
-                    raise ProviderError(f"{self.name}: HTTP {resp.status_code}")
-                if resp.status_code >= 400:
-                    # Errores 4xx (salvo 429) son del símbolo/petición: no se reintentan ni abren el cortacircuitos
-                    raise _ClientError(f"{self.name}: HTTP {resp.status_code}")
+                with (
+                    httpx.Client(timeout=self.timeout, transport=_TRANSPORT, follow_redirects=False,
+                                 headers={"User-Agent": "OpenMarket (self-hosted)",
+                                          "Accept-Encoding": "identity"}) as client,
+                    client.stream("GET", target, params=params) as incoming,
+                ):
+                    status = incoming.status_code
+                    if status == 429 or status >= 500:
+                        self._note_failure()
+                        raise ProviderError(f"{self.name}: HTTP {status}")
+                    if not 200 <= status < 300:
+                        raise _ClientError(f"{self.name}: HTTP {status}")
+                    if incoming.headers.get("Content-Encoding", "identity").lower() != "identity":
+                        raise _ClientError(f"{self.name}: codificación HTTP no admitida")
+                    body = bytearray()
+                    for chunk in incoming.iter_bytes():
+                        if len(body) + len(chunk) > 4_000_000:
+                            raise _ClientError(f"{self.name}: respuesta demasiado grande")
+                        body.extend(chunk)
+                    resp = httpx.Response(status, headers=incoming.headers, content=bytes(body))
                 self._note_success()
                 return resp
             except _ClientError as exc:
