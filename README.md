@@ -108,6 +108,12 @@ Ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Registro de tareas: [docs/ROAD
 
 [AGPL-3.0-or-later](LICENSE). Las dependencias principales (FastAPI, pandas, NumPy, httpx, React, Vite, Tailwind, lightweight-charts) usan licencias permisivas (MIT/BSD/Apache-2.0) compatibles; comprueba las versiones concretas con `pip-licenses` / `license-checker` antes de distribuir.
 
-## Estabilización de 1.0
+## Estado del proyecto
 
-OpenMarket conserva la versión 0.2.0 mientras se verifican los criterios del release. Consulta la [auditoría de estabilidad](docs/STABILITY_AUDIT.md) y la [guía de copia y restauración](docs/BACKUP.md). El mantenedor conserva la autoría y dirección del proyecto. Esta revisión de código, seguridad y pruebas contó con asistencia de IA.
+OpenMarket se mantiene en **0.2.0** mientras se completan los criterios de la versión 1.0. El primer incremento de estabilización protege el saldo y las posiciones frente a operaciones concurrentes, refuerza el acceso remoto y añade copia y restauración verificadas de SQLite. El modo demo requiere activación explícita.
+
+La verificación local incluyó 102 pruebas de backend, 18 de frontend, typecheck, build y arranque con SQLite temporal. Se verificaron consultas reales a Kraken y Frankfurter. Quedan pendientes la verificación con claves de Stooq y Finnhub, la construcción Docker y la CI de release.
+
+El siguiente incremento limitará la antigüedad de los datos cacheados y mostrará su caducidad en la API y la interfaz. Consulta la [auditoría de estabilidad](docs/STABILITY_AUDIT.md) y la [guía de copia y restauración](docs/BACKUP.md).
+
+El mantenedor conserva la autoría y dirección del proyecto. Esta revisión de código, seguridad y pruebas contó con asistencia de IA.
